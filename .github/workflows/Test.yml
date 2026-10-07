@@ -38,6 +38,28 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
+      - name: Locate Android app module
+        run: |
+          APP_DIR=""
+          candidates="app $(find . -type f \( -name build.gradle.kts -o -name build.gradle \) -not -path './.git/*' -not -path '*/build/*' -exec dirname {} \; | sed 's|^\./||' | sort -u)"
+          for dir in $candidates; do
+            gradle_file=""
+            [ -f "$dir/build.gradle.kts" ] && gradle_file="$dir/build.gradle.kts"
+            [ -z "$gradle_file" ] && [ -f "$dir/build.gradle" ] && gradle_file="$dir/build.gradle"
+            if [ -n "$gradle_file" ] && [ -f "$dir/src/main/AndroidManifest.xml" ] && grep -Eq "android[.]application" "$gradle_file"; then
+              APP_DIR="$dir"
+              break
+            fi
+          done
+          if [ -z "$APP_DIR" ]; then
+            echo "::error::No Android app module found (needs <module>/build.gradle[.kts] with the android application plugin and <module>/src/main/AndroidManifest.xml)."
+            echo "Repository contents:"
+            find . -not -path './.git/*' -not -path './.git' | sort | head -100
+            exit 1
+          fi
+          echo "Using app module: $APP_DIR"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
       - name: Patch app name and version
         run: |
           python3 - <<'PY'
@@ -62,7 +84,7 @@ jobs:
               version_code = run_number
 
           # ---- AndroidManifest.xml: android:label on <application> ----
-          manifest_path = "app/src/main/AndroidManifest.xml"
+          manifest_path = os.path.join(os.environ["APP_DIR"], "src/main/AndroidManifest.xml")
           with open(manifest_path, "r", encoding="utf-8") as f:
               manifest = f.read()
 
@@ -95,26 +117,28 @@ jobs:
           with open(manifest_path, "w", encoding="utf-8") as f:
               f.write(manifest)
 
-          # ---- app/build.gradle.kts: versionName / versionCode ----
-          gradle_path = "app/build.gradle.kts"
+          # ---- module build.gradle(.kts): versionName / versionCode ----
+          gradle_path = os.path.join(os.environ["APP_DIR"], "build.gradle.kts")
+          if not os.path.isfile(gradle_path):
+              gradle_path = os.path.join(os.environ["APP_DIR"], "build.gradle")
           with open(gradle_path, "r", encoding="utf-8") as f:
               gradle = f.read()
 
           gradle, n_name = re.subn(
-              r'versionName\s*=\s*"[^"]*"',
+              r'versionName\s*=?\s*"[^"]*"',
               lambda _: 'versionName = "%s"' % version,
               gradle,
               count=1,
           )
           gradle, n_code = re.subn(
-              r"versionCode\s*=\s*\d+",
+              r"versionCode\s*=?\s*\d+",
               lambda _: "versionCode = %d" % version_code,
               gradle,
               count=1,
           )
 
           if n_name == 0 or n_code == 0:
-              print("ERROR: versionName/versionCode not found in app/build.gradle.kts")
+              print("ERROR: versionName/versionCode not found in " + gradle_path)
               sys.exit(1)
 
           with open(gradle_path, "w", encoding="utf-8") as f:
@@ -143,7 +167,7 @@ jobs:
               "mipmap-xxxhdpi": 192,
           }
 
-          res_dir = "app/src/main/res"
+          res_dir = os.path.join(os.environ["APP_DIR"], "src/main/res")
           src = Image.open("build-icon.png").convert("RGBA")
 
           for folder, px in sizes.items():
@@ -165,7 +189,7 @@ jobs:
                           print("Removed " + path)
 
           # Point the manifest at the injected icons.
-          manifest_path = "app/src/main/AndroidManifest.xml"
+          manifest_path = os.path.join(os.environ["APP_DIR"], "src/main/AndroidManifest.xml")
           with open(manifest_path, "r", encoding="utf-8") as f:
               manifest = f.read()
 
@@ -202,5 +226,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.app_name || 'WebPaper' }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ env.APP_DIR }}/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
